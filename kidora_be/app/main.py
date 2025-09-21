@@ -30,6 +30,7 @@ def on_startup():
     import app.models.address  # register Address model
     import app.models.hero_banner  # register HeroBanner model
     import app.models.return_request  # register ReturnRequest model
+    import app.models.payment_config  # register PaymentConfig model
     Base.metadata.create_all(bind=engine)
 
     # Lightweight, idempotent migrations for schema drift across environments
@@ -172,6 +173,22 @@ def on_startup():
             except Exception:
                 pass
 
+            # Ensure video_url column exists on products
+            try:
+                conn.execute(text(
+                    "ALTER TABLE IF EXISTS products ADD COLUMN IF NOT EXISTS video_url VARCHAR(500)"
+                ))
+            except Exception:
+                pass
+
+            # Ensure free_shipping column exists on products (boolean default false)
+            try:
+                conn.execute(text(
+                    "ALTER TABLE IF EXISTS products ADD COLUMN IF NOT EXISTS free_shipping BOOLEAN DEFAULT FALSE"
+                ))
+            except Exception:
+                pass
+
             # Ensure orders.status and orders.payment_status check constraints allow our canonical set
             # Normalize any existing lowercase/mismatched values before re-adding constraints
             try:
@@ -224,14 +241,7 @@ app.mount("/media", StaticFiles(directory=str(MEDIA_ROOT)), name="media")
 # CORS configuration for frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",  # Vite default
-        "http://127.0.0.1:5173",
-        "http://localhost:4173",  # Vite preview
-        "http://127.0.0.1:4173",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -250,3 +260,5 @@ app.include_router(hero_banners.router, prefix="/api/hero-banners", tags=["hero-
 app.include_router(user_router.router, prefix="/api/user", tags=["user"])
 app.include_router(admin_dashboard.router, prefix="/api/admin", tags=["admin-dashboard"])
 app.include_router(admin_returns.router, prefix="/api/admin/returns", tags=["admin-returns"])
+from app.routers import admin_payment_config
+app.include_router(admin_payment_config.router, prefix="/api", tags=["payment-config"])

@@ -2,10 +2,45 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Q
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from app.models.product import Product
+from urllib.parse import urlparse, parse_qs
+
+
+def _normalize_video_embed(url: Optional[str]) -> Optional[str]:
+    """Convert common YouTube URLs (watch, youtu.be, shorts) to embeddable format.
+    Returns the original URL if it doesn't match known patterns or is falsy."""
+    if not url:
+        return url
+    try:
+        u = str(url).strip()
+        p = urlparse(u)
+        host = (p.netloc or '').lower()
+        path = (p.path or '').strip('/').split('/')
+
+        # youtu.be/<id>
+        if 'youtu.be' in host and path and path[0]:
+            vid = path[0]
+            return f"https://www.youtube.com/embed/{vid}"
+
+        # youtube.com/shorts/<id>
+        if 'youtube.com' in host and len(path) >= 2 and path[0] == 'shorts' and path[1]:
+            vid = path[1]
+            return f"https://www.youtube.com/embed/{vid}"
+
+        # youtube.com/watch?v=<id>
+        if 'youtube.com' in host and (path and path[0] == 'watch'):
+            q = parse_qs(p.query or '')
+            vid = (q.get('v') or [None])[0]
+            if vid:
+                return f"https://www.youtube.com/embed/{vid}"
+
+        # Already embed or unknown — return as-is
+        return u
+    except Exception:
+        return url
 from sqlalchemy import func, or_
 from app.models.user import get_db
 from app.schemas.product import ProductOut
-from app.utils.security import get_current_user, ADMIN_EMAIL
+from app.utils.security import get_current_user, is_admin_email
 from app.utils.storage import save_upload_file, save_multiple_upload_files, save_from_path_or_url, save_multiple_from_paths_or_urls
 
 router = APIRouter()
@@ -26,8 +61,10 @@ def to_product_out(p: Product) -> ProductOut:
         rating=p.rating,
         discount=p.discount,
         main_image=p.main_image,
+        video=_normalize_video_embed(p.video_url),
         images=parse_images(p.images),
         sizes_stock=p.sizes_stock or None,
+        free_shipping=bool(getattr(p, 'free_shipping', False)),
     )
 
 # 6. Get All Products (with filters)
@@ -103,6 +140,8 @@ def create_product(
     mainImage: UploadFile = File(...),
     images: List[UploadFile] = File([]),
     sizes_stock: str = Form(None, description="JSON string mapping size -> quantity"),
+    video: str = Form(None, description="Embedded video URL e.g. https://www.youtube.com/embed/..."),
+    free_shipping: bool = Form(False),
     db: Session = Depends(get_db),
     current_user: str = Depends(get_current_user)
 ):
@@ -135,8 +174,10 @@ def create_product(
         rating=rating,
         discount=discount,
         main_image=main_image_url,
+        video_url=_normalize_video_embed(video),
         images=image_urls,
         sizes_stock=sizes_map,
+        free_shipping=free_shipping,
     )
     db.add(product)
     db.commit()
@@ -160,6 +201,8 @@ def update_product(
     main_image_url: Optional[str] = Form(None),
     image_urls: List[str] = Form([]),
     sizes_stock: str = Form(None, description="JSON string mapping size -> quantity"),
+    video: str = Form(None, description="Embedded video URL e.g. https://www.youtube.com/embed/..."),
+    free_shipping: bool = Form(False),
     db: Session = Depends(get_db),
     current_user: str = Depends(get_current_user)
 ):
@@ -175,6 +218,10 @@ def update_product(
     product.stock = stock
     product.rating = rating
     product.discount = discount
+    product.free_shipping = free_shipping
+    # Video URL
+    if video is not None:
+        product.video_url = _normalize_video_embed(video) or None
     if sizes_stock is not None:
         try:
             import json
@@ -260,7 +307,7 @@ def upload_file(
     file: UploadFile = File(...),
     current_user: str = Depends(get_current_user),
 ):
-    if current_user != ADMIN_EMAIL:
+    if not is_admin_email(current_user):
         raise HTTPException(status_code=403, detail="Admin access required")
     url = save_upload_file(file, subdir="products")
     return {"url": url}

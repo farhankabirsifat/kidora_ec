@@ -15,7 +15,9 @@ from app.schemas.order import (
     OrderStatusUpdate,
     OrderPaymentStatusUpdate,
 )
-from app.utils.security import get_current_user
+from app.utils.security import get_current_user, send_email
+from app.config import get_settings
+from app.utils.email_templates import order_confirmation, order_status_update, payment_status_update
 from app.models.user import engine
 
 
@@ -182,6 +184,15 @@ def create_order(
 
     db.commit()
     db.refresh(order)
+    # Send confirmation email
+    try:
+        settings = get_settings()
+        if getattr(settings, 'ENABLE_EMAIL_NOTIFICATIONS', True):
+            item_count = len(order.items)
+            tpl = order_confirmation(order.id, order.total_amount or 0.0, item_count)
+            send_email(user.email, tpl['subject'], tpl['body'])
+    except Exception:
+        pass
     return map_order_to_out(order)
 
 
@@ -293,17 +304,29 @@ def get_admin_orders(
     db: Session = Depends(get_db),
     current_user_email: str = Depends(get_current_user),
 ):
-    # Simple rule: treat the first registered user as admin, or match specific email
-    is_admin = current_user_email.endswith("@admin") or current_user_email == "admin@example.com"
-    if not is_admin:
-        # Fallback: allow ADMIN_EMAIL from settings to act as admin as well
-        from app.utils.security import ADMIN_EMAIL
-
-        if current_user_email != ADMIN_EMAIL:
-            raise HTTPException(status_code=403, detail="Admin access required")
+    from app.utils.security import is_admin_email
+    if not is_admin_email(current_user_email):
+        raise HTTPException(status_code=403, detail="Admin access required")
 
     query = db.query(Order).order_by(Order.created_at.desc())
     orders = query.offset(page * size).limit(size).all()
+    return [map_order_to_out(o) for o in orders]
+
+
+@admin_router.get("/by-user/{user_id}", response_model=List[OrderOut])
+def get_admin_orders_by_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user_email: str = Depends(get_current_user),
+):
+    """List all orders for a given user (admin only)."""
+    from app.utils.security import is_admin_email
+    if not is_admin_email(current_user_email):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    orders = db.query(Order).filter(Order.user_id == user.id).order_by(Order.created_at.desc()).all()
     return [map_order_to_out(o) for o in orders]
 
 
@@ -315,12 +338,9 @@ def admin_update_order_status(
     db: Session = Depends(get_db),
     current_user_email: str = Depends(get_current_user),
 ):
-    is_admin = current_user_email.endswith("@admin") or current_user_email == "admin@example.com"
-    if not is_admin:
-        from app.utils.security import ADMIN_EMAIL
-
-        if current_user_email != ADMIN_EMAIL:
-            raise HTTPException(status_code=403, detail="Admin access required")
+    from app.utils.security import is_admin_email
+    if not is_admin_email(current_user_email):
+        raise HTTPException(status_code=403, detail="Admin access required")
 
     order = db.query(Order).filter(Order.id == id).first()
     if not order:
@@ -345,6 +365,17 @@ def admin_update_order_status(
             pass
         db.commit()
     db.refresh(order)
+    # Email status update
+    try:
+        settings = get_settings()
+        if getattr(settings, 'ENABLE_EMAIL_NOTIFICATIONS', True):
+            tpl = order_status_update(order.id, order.status)
+            # look up user email
+            u = db.query(User).filter(User.id == order.user_id).first()
+            if u and u.email:
+                send_email(u.email, tpl['subject'], tpl['body'])
+    except Exception:
+        pass
     return map_order_to_out(order)
 
 
@@ -356,12 +387,9 @@ def admin_update_payment_status(
     db: Session = Depends(get_db),
     current_user_email: str = Depends(get_current_user),
 ):
-    is_admin = current_user_email.endswith("@admin") or current_user_email == "admin@example.com"
-    if not is_admin:
-        from app.utils.security import ADMIN_EMAIL
-
-        if current_user_email != ADMIN_EMAIL:
-            raise HTTPException(status_code=403, detail="Admin access required")
+    from app.utils.security import is_admin_email
+    if not is_admin_email(current_user_email):
+        raise HTTPException(status_code=403, detail="Admin access required")
 
     order = db.query(Order).filter(Order.id == id).first()
     if not order:
@@ -386,4 +414,14 @@ def admin_update_payment_status(
             pass
         db.commit()
     db.refresh(order)
+    # Email payment status update
+    try:
+        settings = get_settings()
+        if getattr(settings, 'ENABLE_EMAIL_NOTIFICATIONS', True):
+            tpl = payment_status_update(order.id, order.payment_status)
+            u = db.query(User).filter(User.id == order.user_id).first()
+            if u and u.email:
+                send_email(u.email, tpl['subject'], tpl['body'])
+    except Exception:
+        pass
     return map_order_to_out(order)
